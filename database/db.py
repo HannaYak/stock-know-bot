@@ -1,207 +1,200 @@
-import aiosqlite
 import asyncio
 from typing import List, Optional
-from .models import User, Game, Round, PlayerAnswer
+import os
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.sql import func
 from config import DATABASE_URL
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String)
+    first_name = Column(String)
+    is_ready = Column(Boolean, default=False)
+    is_admin = Column(Boolean, default=False)
+
+class Game(Base):
+    __tablename__ = 'games'
+    id = Column(Integer, primary_key=True)
+    is_active = Column(Boolean, default=True)
+    current_round = Column(Integer, default=0)
+    created_at = Column(DateTime, default=func.now())
+
+class Round(Base):
+    __tablename__ = 'rounds'
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey('games.id'))
+    round_number = Column(Integer)
+    question = Column(Text)
+    is_active = Column(Boolean, default=False)
+    hint1 = Column(Text, default="")
+    hint2 = Column(Text, default="")
+    hint3 = Column(Text, default="")
+    winner_id = Column(Integer, ForeignKey('users.id'))
+
+class PlayerAnswer(Base):
+    __tablename__ = 'player_answers'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    round_id = Column(Integer, ForeignKey('rounds.id'))
+    answer = Column(Text)
+    submitted_at = Column(DateTime, default=func.now())
 
 class Database:
     def __init__(self, db_url: str = DATABASE_URL):
         self.db_url = db_url
-        self.db = None
+        self.engine = None
+        self.sessionmaker = None
     
     async def __aenter__(self):
-        self.db = await aiosqlite.connect(self.db_url)
-        await self._create_tables()
+        # Для PostgreSQL добавляем параметры
+        if self.db_url.startswith('postgresql'):
+            self.db_url += f"?server_settings=TimeZone=UTC"
+        
+        self.engine = create_async_engine(self.db_url, echo=False)
+        self.sessionmaker = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
+        
+        # Создаём таблицы
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.db.close()
+        if self.engine:
+            await self.engine.dispose()
     
-    async def _create_tables(self):
-        """Создаёт необходимые таблицы"""
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                is_ready BOOLEAN DEFAULT 0,
-                is_admin BOOLEAN DEFAULT 0
-            )
-        """)
-        
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS games (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                is_active BOOLEAN DEFAULT 1,
-                current_round INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS rounds (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_id INTEGER,
-                round_number INTEGER,
-                question TEXT,
-                is_active BOOLEAN DEFAULT 0,
-                hint1 TEXT DEFAULT '',
-                hint2 TEXT DEFAULT '',
-                hint3 TEXT DEFAULT '',
-                winner_id INTEGER,
-                FOREIGN KEY (game_id) REFERENCES games (id)
-            )
-        """)
-        
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS player_answers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                round_id INTEGER,
-                answer TEXT,
-                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (id),
-                FOREIGN KEY (round_id) REFERENCES rounds (id)
-            )
-        """)
-        
-        await self.db.commit()
+    async def get_session(self) -> AsyncSession:
+        return self.sessionmaker()
     
     async def get_or_create_user(self, user_id: int, username: str, first_name: str) -> User:
-        """Получить или создать пользователя"""
-        cursor = await self.db.execute(
-            "SELECT * FROM users WHERE id = ?", (user_id,)
-        )
-        row = await cursor.fetchone()
-        
-        if row:
-            return User(id=row[0], username=row[1], first_name=row[2], 
-                       is_ready=row[3], is_admin=row[4])
-        
-        await self.db.execute(
-            "INSERT OR IGNORE INTO users (id, username, first_name) VALUES (?, ?, ?)",
-            (user_id, username, first_name)
-        )
-        await self.db.commit()
-        
-        return User(id=user_id, username=username, first_name=first_name)
+        async with self.get_session() as session:
+            async with session.begin():
+                user = await session.get(User, user_id)
+                if not user:
+                    user = User(id=user_id, username=username, first_name=first_name)
+                    session.add(user)
+                    await session.flush()
+                return user
     
     async def set_user_ready(self, user_id: int, is_ready: bool = True):
-        """Установить готовность пользователя"""
-        await self.db.execute(
-            "UPDATE users SET is_ready = ? WHERE id = ?",
-            (is_ready, user_id)
-        )
-        await self.db.commit()
+        async with self.get_session() as session:
+            async with session.begin():
+                user = await session.get(User, user_id)
+                if user:
+                    user.is_ready = is_ready
     
     async def create_game(self) -> Game:
-        """Создать новую игру"""
-        cursor = await self.db.execute(
-            "INSERT INTO games (is_active, current_round) VALUES (1, 0)",
-            ()
-        )
-        game_id = cursor.lastrowid
-        await self.db.commit()
-        
-        return Game(id=game_id, is_active=True, current_round=0)
+        async with self.get_session() as session:
+            async with session.begin():
+                game = Game(is_active=True, current_round=0)
+                session.add(game)
+                await session.flush()
+                return game
     
     async def get_active_game(self) -> Optional[Game]:
-        """Получить активную игру"""
-        cursor = await self.db.execute(
-            "SELECT * FROM games WHERE is_active = 1 LIMIT 1",
-            ()
-        )
-        row = await cursor.fetchone()
-        if row:
-            return Game(id=row[0], is_active=row[1], current_round=row[2])
-        return None
+        async with self.get_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    "SELECT * FROM games WHERE is_active = true LIMIT 1"
+                )
+                row = result.fetchone()
+                if row:
+                    return Game(id=row.id, is_active=row.is_active, current_round=row.current_round)
+                return None
     
     async def create_round(self, game_id: int, round_number: int, question: str) -> Round:
-        """Создать новый раунд"""
-        cursor = await self.db.execute(
-            "INSERT INTO rounds (game_id, round_number, question, is_active) VALUES (?, ?, ?, 1)",
-            (game_id, round_number, question)
-        )
-        round_id = cursor.lastrowid
-        await self.db.commit()
-        
-        return Round(id=round_id, game_id=game_id, round_number=round_number, 
-                    question=question, is_active=True)
+        async with self.get_session() as session:
+            async with session.begin():
+                round_obj = Round(game_id=game_id, round_number=round_number, 
+                                question=question, is_active=True)
+                session.add(round_obj)
+                await session.flush()
+                return round_obj
     
     async def get_current_round(self, game_id: int) -> Optional[Round]:
-        """Получить текущий раунд игры"""
-        cursor = await self.db.execute(
-            "SELECT * FROM rounds WHERE game_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 1",
-            (game_id,)
-        )
-        row = await cursor.fetchone()
-        if row:
-            return Round(
-                id=row[0], game_id=row[1], round_number=row[2], question=row[3],
-                is_active=row[4], hint1=row[5], hint2=row[6], hint3=row[7], winner_id=row[8]
-            )
-        return None
+        async with self.get_session() as session:
+            async with session.begin():
+                result = await session.execute("""
+                    SELECT * FROM rounds 
+                    WHERE game_id = :game_id AND is_active = true 
+                    ORDER BY id DESC LIMIT 1
+                """, {"game_id": game_id})
+                row = result.fetchone()
+                if row:
+                    return Round(
+                        id=row.id, game_id=row.game_id, round_number=row.round_number,
+                        question=row.question, is_active=row.is_active,
+                        hint1=row.hint1, hint2=row.hint2, hint3=row.hint3
+                    )
+                return None
     
     async def set_hint(self, round_id: int, hint_num: int, hint_text: str):
-        """Установить подсказку"""
-        column = f"hint{hint_num}"
-        await self.db.execute(
-            f"UPDATE rounds SET {column} = ? WHERE id = ?",
-            (hint_text, round_id)
-        )
-        await self.db.commit()
+        async with self.get_session() as session:
+            async with session.begin():
+                column = f"hint{hint_num}"
+                await session.execute(
+                    f"UPDATE rounds SET {column} = :hint WHERE id = :round_id",
+                    {"hint": hint_text, "round_id": round_id}
+                )
     
     async def submit_answer(self, user_id: int, round_id: int, answer: str) -> PlayerAnswer:
-        """Принять ответ игрока"""
-        cursor = await self.db.execute(
-            "INSERT INTO player_answers (user_id, round_id, answer) VALUES (?, ?, ?)",
-            (user_id, round_id, answer)
-        )
-        answer_id = cursor.lastrowid
-        await self.db.commit()
-        
-        return PlayerAnswer(id=answer_id, user_id=user_id, round_id=round_id, answer=answer)
+        async with self.get_session() as session:
+            async with session.begin():
+                player_answer = PlayerAnswer(user_id=user_id, round_id=round_id, answer=answer)
+                session.add(player_answer)
+                await session.flush()
+                return player_answer
     
     async def get_round_answers(self, round_id: int) -> List[PlayerAnswer]:
-        """Получить все ответы раунда"""
-        cursor = await self.db.execute("""
-            SELECT pa.*, u.username, u.first_name 
-            FROM player_answers pa 
-            JOIN users u ON pa.user_id = u.id 
-            WHERE pa.round_id = ? 
-            ORDER BY u.first_name
-        """, (round_id,))
-        
-        rows = await cursor.fetchall()
-        return [
-            PlayerAnswer(id=row[0], user_id=row[1], round_id=row[2], answer=row[3])
-            for row in rows
-        ]
+        async with self.get_session() as session:
+            async with session.begin():
+                result = await session.execute("""
+                    SELECT pa.*, u.username, u.first_name 
+                    FROM player_answers pa 
+                    JOIN users u ON pa.user_id = u.id 
+                    WHERE pa.round_id = :round_id 
+                    ORDER BY u.first_name
+                """, {"round_id": round_id})
+                
+                rows = result.fetchall()
+                return [PlayerAnswer(
+                    id=row.id, user_id=row.user_id, 
+                    round_id=row.round_id, answer=row.answer
+                ) for row in rows]
     
-    async def set_round_winner(self, round_id: int, winner_id: int):
-        """Установить победителя раунда"""
-        await self.db.execute(
-            "UPDATE rounds SET winner_id = ?, is_active = 0 WHERE id = ?",
-            (winner_id, round_id)
-        )
-        await self.db.commit()
+    async def set_round_winner(self, round_id: int, winner_id: Optional[int] = None):
+        async with self.get_session() as session:
+            async with session.begin():
+                if winner_id:
+                    await session.execute(
+                        "UPDATE rounds SET winner_id = :winner_id, is_active = false WHERE id = :round_id",
+                        {"winner_id": winner_id, "round_id": round_id}
+                    )
+                else:
+                    await session.execute(
+                        "UPDATE rounds SET is_active = false WHERE id = :round_id",
+                        {"round_id": round_id}
+                    )
     
     async def get_ready_players(self) -> List[User]:
-        """Получить готовых игроков"""
-        cursor = await self.db.execute(
-            "SELECT * FROM users WHERE is_ready = 1",
-            ()
-        )
-        rows = await cursor.fetchall()
-        return [
-            User(id=row[0], username=row[1], first_name=row[2], 
-                is_ready=row[3], is_admin=row[4])
-            for row in rows
-        ]
+        async with self.get_session() as session:
+            async with session.begin():
+                result = await session.execute("SELECT * FROM users WHERE is_ready = true")
+                rows = result.fetchall()
+                return [User(
+                    id=row.id, username=row.username, first_name=row.first_name,
+                    is_ready=row.is_ready, is_admin=row.is_admin
+                ) for row in rows]
     
     async def reset_game_state(self):
-        """Сбросить состояние игры (для новой игры)"""
-        await self.db.execute("UPDATE users SET is_ready = 0")
-        await self.db.execute("UPDATE games SET is_active = 0")
-        await self.db.execute("UPDATE rounds SET is_active = 0")
-        await self.db.commit()
+        async with self.get_session() as session:
+            async with session.begin():
+                await session.execute("UPDATE users SET is_ready = false")
+                await session.execute("UPDATE games SET is_active = false")
+                await session.execute("UPDATE rounds SET is_active = false")
