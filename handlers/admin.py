@@ -113,7 +113,7 @@ async def admin_set_hint(callback: CallbackQuery, state: FSMContext, db: Databas
         parse_mode="Markdown"
     )
 
-@router.message(StateFilter(AdminStates.waiting_hint1 | AdminStates.waiting_hint2 | AdminStates.waiting_hint3), 
+@router.message(StateFilter(AdminStates.waiting_hint1, AdminStates.waiting_hint2, AdminStates.waiting_hint3)), 
                 F.from_user.id == ADMIN_ID)
 async def receive_admin_hint(message: Message, state: FSMContext, db: Database, bot: Bot):
     """Получить подсказку от админа"""
