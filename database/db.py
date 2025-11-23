@@ -17,7 +17,7 @@ class User(Base):
     username = Column(String, nullable=True)
     first_name = Column(String)
     is_ready = Column(Boolean, default=False)
-    is_admin = Column(Boolean, default=False)   # ← ВЕРНУЛИ ПОЛЕ!
+    is_admin = Column(Boolean, default=False)
 
 
 class Game(Base):
@@ -79,25 +79,94 @@ class Database:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.engine.dispose()
 
-    # === МЕТОДЫ ===
+    # === ВСЕ НЕОБХОДИМЫЕ МЕТОДЫ ===
     async def get_or_create_user(self, user_id: int, username: str | None, first_name: str):
         async with self.session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))
             user = result.scalar_one_or_none()
             if not user:
-                is_admin = (user_id == 5456905649)  # ← твой ID
-                user = User(id=user_id, username=username, first_name=first_name, is_admin=is_admin)
+                user = User(id=user_id, username=username, first_name=first_name,
+                            is_admin=(user_id == 5456905649))
                 session.add(user)
                 await session.commit()
             return user
+
+    async def set_user_ready(self, user_id: int, ready: bool = True):
+        async with self.session_factory() as session:
+            await session.execute(update(User).where(User.id == user_id).values(is_ready=ready))
+            await session.commit()
+
+    async def create_game(self):
+        async with self.session_factory() as session:
+            game = Game()
+            session.add(game)
+            await session.commit()
+            await session.refresh(game)
+            return game
+
+    async def get_active_game(self):
+        async with self.session_factory() as session:
+            result = await session.execute(select(Game).where(Game.is_active == True))
+            return result.scalar_one_or_none()
+
+    async def create_round(self, game_id: int, round_number: int, question: str):
+        async with self.session_factory() as session:
+            rnd = Round(game_id=game_id, round_number=round_number, question=question)
+            session.add(rnd)
+            await session.commit()
+            await session.refresh(rnd)
+            return rnd
+
+    async def get_current_round(self, game_id: int):
+        async with self.session_factory() as session:
+            result = await session.execute(select(Round).where(Round.game_id == game_id, Round.is_active == True))
+            return result.scalar_one_or_none()
+
+    async def set_hint(self, round_id: int, hint_num: int, text: str):
+        async with self.session_factory() as session:
+            await session.execute(update(Round).where(Round.id == round_id).values(**{f"hint{hint_num}": text}))
+            await session.commit()
+
+    async def submit_answer(self, user_id: int, round_id: int, answer: str):
+        async with self.session_factory() as session:
+            ans = PlayerAnswer(user_id=user_id, round_id=round_id, answer=answer)
+            session.add(ans)
+            await session.commit()
+
+    async def get_round_answers(self, round_id: int):
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(PlayerAnswer.answer, User.first_name)
+                .join(User)
+                .where(PlayerAnswer.round_id == round_id)
+            )
+            return result.all()
+
+    async def set_round_winner(self, round_id: int, winner_id: int | None):
+        async with self.session_factory() as session:
+            await session.execute(update(Round).where(Round.id == round_id).values(is_active=False, winner_id=winner_id))
+            await session.commit()
+
+    async def get_ready_players(self):
+        async with self.session_factory() as session:
+            result = await session.execute(select(User).where(User.is_ready == True))
+            return result.scalars().all()
 
     async def reset_game_state(self):
         async with self.session_factory() as session:
             await session.execute(update(Round).where(Round.is_active == True).values(is_active=False))
             await session.execute(update(Game).where(Game.is_active == True).values(is_active=False))
             await session.execute(update(User).values(is_ready=False))
-            await session.execute(text("DELETE FROM player_answers"))  # ← ИСПРАВИЛИ!
+            await session.execute(text("DELETE FROM player_answers"))
             await session.commit()
 
-    # остальные методы оставь как были (set_user_ready, create_game и т.д.)
-    # если хочешь — могу скинуть полный файл целиком ещё раз
+    async def load_questions(self, questions_list):
+        async with self.session_factory() as session:
+            for q in questions_list:
+                session.add(Question(**q))
+            await session.commit()
+
+    async def get_random_questions(self, count=7):
+        async with self.session_factory() as session:
+            result = await session.execute(select(Question).order_by(func.random()).limit(count))
+            return result.scalars().all()
