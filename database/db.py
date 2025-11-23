@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import (
     Column, Integer, String, Boolean, Text, DateTime,
-    ForeignKey, select, update, func
+    ForeignKey, select, update, func, text
 )
 from config import DATABASE_URL
 
@@ -17,6 +17,7 @@ class User(Base):
     username = Column(String, nullable=True)
     first_name = Column(String)
     is_ready = Column(Boolean, default=False)
+    is_admin = Column(Boolean, default=False)   # ← ВЕРНУЛИ ПОЛЕ!
 
 
 class Game(Base):
@@ -58,7 +59,7 @@ class Question(Base):
     hint3 = Column(Text)
 
 
-# ==================== БАЗА ДАННЫХ ====================
+# ==================== БАЗА ====================
 class Database:
     def __init__(self):
         db_url = DATABASE_URL
@@ -78,52 +79,25 @@ class Database:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.engine.dispose()
 
-    # === Основные методы ===
+    # === МЕТОДЫ ===
     async def get_or_create_user(self, user_id: int, username: str | None, first_name: str):
         async with self.session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))
             user = result.scalar_one_or_none()
             if not user:
-                user = User(id=user_id, username=username, first_name=first_name)
+                is_admin = (user_id == 5456905649)  # ← твой ID
+                user = User(id=user_id, username=username, first_name=first_name, is_admin=is_admin)
                 session.add(user)
                 await session.commit()
             return user
-
-    async def set_user_ready(self, user_id: int, ready: bool = True):
-        async with self.session_factory() as session:
-            await session.execute(update(User).where(User.id == user_id).values(is_ready=ready))
-            await session.commit()
-
-    async def create_game(self):
-        async with self.session_factory() as session:
-            game = Game()
-            session.add(game)
-            await session.commit()
-            await session.refresh(game)
-            return game.id
-
-    async def get_active_game(self):
-        async with self.session_factory() as session:
-            result = await session.execute(select(Game).where(Game.is_active == True))
-            return result.scalar_one_or_none()
-
-    async def create_round(self, game_id: int, round_number: int, question: str):
-        async with self.session_factory() as session:
-            rnd = Round(game_id=game_id, round_number=round_number, question=question)
-            session.add(rnd)
-            await session.commit()
-            await session.refresh(rnd)
-            return rnd
 
     async def reset_game_state(self):
         async with self.session_factory() as session:
             await session.execute(update(Round).where(Round.is_active == True).values(is_active=False))
             await session.execute(update(Game).where(Game.is_active == True).values(is_active=False))
             await session.execute(update(User).values(is_ready=False))
-            await session.execute("DELETE FROM player_answers")
+            await session.execute(text("DELETE FROM player_answers"))  # ← ИСПРАВИЛИ!
             await session.commit()
 
-    async def get_ready_players(self):
-        async with self.session_factory() as session:
-            result = await session.execute(select(User).where(User.is_ready == True))
-            return result.scalars().all()
+    # остальные методы оставь как были (set_user_ready, create_game и т.д.)
+    # если хочешь — могу скинуть полный файл целиком ещё раз
