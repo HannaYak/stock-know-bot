@@ -23,8 +23,10 @@ class AdminStates(StatesGroup):
     waiting_hint2 = State()
     waiting_hint3 = State()
 
-@router.message(F.from_user.id == ADMIN_ID, F.text == "/admin")
-async def admin_panel(message: Message, state: FSMContext):
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, db: Database):
+    if message.from_user.id != ADMIN_ID:
+        return
     """Панель администратора"""
     keyboard = get_admin_start_keyboard()
     await message.answer(
