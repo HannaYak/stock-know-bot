@@ -36,3 +36,12 @@ class PlayerAnswer:
     round_id: int
     answer: str
     submitted_at: datetime = datetime.now()
+
+@dataclass
+class Question:
+    id: int
+    question: str
+    answer: str
+    hint1: str
+    hint2: str
+    hint3: str
