@@ -53,8 +53,13 @@ class Question(Base):
     hint3 = Column(Text)
 
 class Database:
-    def __init__(self):
-        db_url = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+        def __init__(self):
+            db_url = DATABASE_URL
+            if db_url.startswith("postgres://"):
+                db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+            if db_url.startswith("postgresql://"):
+                db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        
         self.engine = create_async_engine(db_url, echo=False, future=True)
         self.session_factory = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
 
