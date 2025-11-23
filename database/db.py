@@ -151,6 +151,18 @@ class Database:
             result = await session.execute(select(User).where(User.is_ready == True))
             return result.scalars().all()
 
+            async def reset_game_state(self):
+        """Очищает все игровые таблицы перед новой игрой"""
+        async with self.session_factory() as session:
+            # Удаляем все ответы игроков
+            await session.execute("DELETE FROM player_answers")
+            # Деактивируем текущие раунды и игры
+            await session.execute("UPDATE rounds SET is_active = FALSE WHERE is_active = TRUE")
+            await session.execute("UPDATE games SET is_active = FALSE WHERE is_active = TRUE")
+            # Сбрасываем готовность игроков
+            await session.execute("UPDATE users SET is_ready = FALSE")
+            await session.commit()        
+
 async def load_questions_from_file(self, file_path: str):
     import json
     with open(file_path, 'r', encoding='utf-8') as f:
