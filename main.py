@@ -7,6 +7,8 @@ from database.db import Database
 from handlers import common, admin, player
 from utils.game_logic import GameManager
 
+db = Database()
+
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
@@ -16,7 +18,7 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     
     # Инициализация БД
-    async with Database() as db:
+    await db.__aenter__()
         # Регистрируем обработчики
         dp.include_router(common.router)
         dp.include_router(admin.router)
