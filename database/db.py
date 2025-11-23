@@ -4,12 +4,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, ForeignKey, select, update
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
-
 from config import DATABASE_URL
 
 Base = declarative_base()
 
-# === МОДЕЛИ ===
+# =================== МОДЕЛИ ===================
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
@@ -45,7 +44,7 @@ class PlayerAnswer(Base):
     answer = Column(Text)
     submitted_at = Column(DateTime, default=func.now())
 
-# === КЛАСС БАЗЫ СО ВСЕМИ МЕТОДАМИ ===
+# =================== КЛАСС БАЗЫ ===================
 class Database:
     def __init__(self):
         db_url = DATABASE_URL
@@ -60,8 +59,6 @@ class Database:
     async def __aenter__(self):
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            
-            # Создаём таблицу для вопросов навсегда
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS questions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +71,10 @@ class Database:
             """)
         return self
 
-    # ─────────────────── МЕТОДЫ ───────────────────
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.engine.dispose()
+
+    # =================== МЕТОДЫ ===================
     async def get_or_create_user(self, user_id: int, username: str | None, first_name: str):
         async with self.session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))
@@ -84,6 +84,11 @@ class Database:
                 session.add(user)
                 await session.commit()
             return user
+
+    async def set_user_ready(self, user_id: int, ready: bool = True):
+        async with self.session_factory() as session:
+            await session.execute(update(User).where(User.id == user_id).values(is_ready=ready))
+            await session.commit()
 
     async def create_game(self):
         async with self.session_factory() as session:
@@ -108,16 +113,12 @@ class Database:
 
     async def get_current_round(self, game_id: int):
         async with self.session_factory() as session:
-            result = await session.execute(
-                select(Round).where(Round.game_id == game_id, Round.is_active == True)
-            )
+            result = await session.execute(select(Round).where(Round.game_id == game_id, Round.is_active == True))
             return result.scalar_one_or_none()
 
     async def set_hint(self, round_id: int, hint_num: int, text: str):
         async with self.session_factory() as session:
-            await session.execute(
-                update(Round).where(Round.id == round_id).values(**{f"hint{hint_num}": text})
-            )
+            await session.execute(update(Round).where(Round.id == round_id).values(**{f"hint{hint_num}": text}))
             await session.commit()
 
     async def submit_answer(self, user_id: int, round_id: int, answer: str):
@@ -130,20 +131,16 @@ class Database:
     async def get_round_answers(self, round_id: int):
         async with self.session_factory() as session:
             result = await session.execute(
-                select(PlayerAnswer, User.first_name).join(User).where(PlayerAnswer.round_id == round_id)
+                select(PlayerAnswer, User.first_name, User.username)
+                .join(User)
+                .where(PlayerAnswer.round_id == round_id)
+                .order_by(User.first_name)
             )
             return result.all()
 
     async def set_round_winner(self, round_id: int, winner_id: int | None = None):
         async with self.session_factory() as session:
-            await session.execute(
-                update(Round).where(Round.id == round_id).values(is_active=False, winner_id=winner_id)
-            )
-            await session.commit()
-
-    async def set_user_ready(self, user_id: int, ready: bool = True):
-        async with self.session_factory() as session:
-            await session.execute(update(User).where(User.id == user_id).values(is_ready=ready))
+            await session.execute(update(Round).where(Round.id == round_id).values(is_active=False, winner_id=winner_id))
             await session.commit()
 
     async def get_ready_players(self):
@@ -151,32 +148,10 @@ class Database:
             result = await session.execute(select(User).where(User.is_ready == True))
             return result.scalars().all()
 
-            async def reset_game_state(self):
-        """Очищает все игровые таблицы перед новой игрой"""
+    async def reset_game_state(self):
         async with self.session_factory() as session:
-            # Удаляем все ответы игроков
             await session.execute("DELETE FROM player_answers")
-            # Деактивируем текущие раунды и игры
-            await session.execute("UPDATE rounds SET is_active = FALSE WHERE is_active = TRUE")
-            await session.execute("UPDATE games SET is_active = FALSE WHERE is_active = TRUE")
-            # Сбрасываем готовность игроков
-            await session.execute("UPDATE users SET is_ready = FALSE")
-            await session.commit()        
-
-async def load_questions_from_file(self, file_path: str):
-    import json
-    with open(file_path, 'r', encoding='utf-8') as f:
-        questions = json.load(f)
-    
-    for q in questions:
-        await self.db.execute("""
-            INSERT INTO questions (question, answer, hint1, hint2, hint3) VALUES (?, ?, ?, ?, ?)
-        """, (q['question'], q['answer'], q['hints'][0], q['hints'][1], q['hints'][2]))
-    
-    await self.db.commit()
-    return len(questions)
-
-async def get_questions(self, count: int = 7):
-    cursor = await self.db.execute("SELECT * FROM questions LIMIT ?", (count,))
-    rows = await cursor.fetchall()
-    return [Question(id=row[0], question=row[1], answer=row[2], hint1=row[3], hint2=row[4], hint3=row[5]) for row in rows]
+            await session.execute("UPDATE rounds SET is_active = 0 WHERE is_active = 1")
+            await session.execute("UPDATE games SET is_active = 0 WHERE is_active = 1")
+            await session.execute("UPDATE users SET is_ready = 0")
+            await session.commit()
