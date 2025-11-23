@@ -57,19 +57,21 @@ class Database:
         self.session_factory = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
 
     async def __aenter__(self):
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS questions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    question TEXT NOT NULL,
-                    answer TEXT NOT NULL,
-                    hint1 TEXT,
-                    hint2 TEXT,
-                    hint3 TEXT
-                )
-            """)
-        return self
+            from sqlalchemy import text
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            # Создаём таблицу для вопросов — теперь правильно!
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS questions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        hint1 TEXT,
+                        hint2 TEXT,
+                        hint3 TEXT
+                    )
+                """))
+            return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.engine.dispose()
