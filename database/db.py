@@ -56,7 +56,11 @@ class Database:
         if self.db_url.startswith('postgresql'):
             self.db_url += f"?server_settings=TimeZone=UTC"
         
-        self.engine = create_async_engine(self.db_url, echo=False)
+        self.engine = create_async_engine(
+            self.db_url.replace("postgresql://", "postgresql+asyncpg://"),
+            echo=False,
+            future=True
+        )
         self.sessionmaker = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
         
         # Создаём таблицы
