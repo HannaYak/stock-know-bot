@@ -141,3 +141,21 @@ class Database:
         async with self.session_factory() as session:
             result = await session.execute(select(User).where(User.is_ready == True))
             return result.scalars().all()
+
+async def load_questions_from_file(self, file_path: str):
+    import json
+    with open(file_path, 'r', encoding='utf-8') as f:
+        questions = json.load(f)
+    
+    for q in questions:
+        await self.db.execute("""
+            INSERT INTO questions (question, answer, hint1, hint2, hint3) VALUES (?, ?, ?, ?, ?)
+        """, (q['question'], q['answer'], q['hints'][0], q['hints'][1], q['hints'][2]))
+    
+    await self.db.commit()
+    return len(questions)
+
+async def get_questions(self, count: int = 7):
+    cursor = await self.db.execute("SELECT * FROM questions LIMIT ?", (count,))
+    rows = await cursor.fetchall()
+    return [Question(id=row[0], question=row[1], answer=row[2], hint1=row[3], hint2=row[4], hint3=row[5]) for row in rows]
