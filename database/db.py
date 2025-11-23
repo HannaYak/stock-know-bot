@@ -1,27 +1,25 @@
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, ForeignKey, select, update
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, ForeignKey, select, update, Sequence
+from sqlalchemy.dialects.postgresql import INTEGER
 from sqlalchemy.sql import func
 from config import DATABASE_URL
 
 Base = declarative_base()
 
-# =================== МОДЕЛИ ===================
+# === МОДЕЛИ ===
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
     username = Column(String, nullable=True)
     first_name = Column(String)
     is_ready = Column(Boolean, default=False)
-    is_admin = Column(Boolean, default=False)
 
 class Game(Base):
     __tablename__ = 'games'
     id = Column(Integer, primary_key=True)
     is_active = Column(Boolean, default=True)
-    current_round = Column(Integer, default=0)
     created_at = Column(DateTime, default=func.now())
 
 class Round(Base):
@@ -44,39 +42,31 @@ class PlayerAnswer(Base):
     answer = Column(Text)
     submitted_at = Column(DateTime, default=func.now())
 
-# =================== КЛАСС БАЗЫ ===================
+# НОВАЯ ТАБЛИЦА ДЛЯ ВОПРОСОВ — РАБОТАЕТ В POSTGRESQL
+class Question(Base):
+    __tablename__ = 'questions'
+    id = Column(Integer, primary_key=True, server_default=Sequence('questions_id_seq').next_value())
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    hint1 = Column(Text)
+    hint2 = Column(Text)
+    hint3 = Column(Text)
+
 class Database:
     def __init__(self):
-        db_url = DATABASE_URL
-        if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
-        elif db_url.startswith("postgresql://"):
-            db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        
+        db_url = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
         self.engine = create_async_engine(db_url, echo=False, future=True)
         self.session_factory = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
 
     async def __aenter__(self):
-            from sqlalchemy import text
-            async with self.engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            # Создаём таблицу для вопросов — теперь правильно!
-                await conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS questions (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        question TEXT NOT NULL,
-                        answer TEXT NOT NULL,
-                        hint1 TEXT,
-                        hint2 TEXT,
-                        hint3 TEXT
-                    )
-                """))
-            return self
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.engine.dispose()
 
-    # =================== МЕТОДЫ ===================
+    # === МЕТОДЫ ===
     async def get_or_create_user(self, user_id: int, username: str | None, first_name: str):
         async with self.session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))
@@ -98,7 +88,7 @@ class Database:
             session.add(game)
             await session.commit()
             await session.refresh(game)
-            return game
+            return game.id
 
     async def get_active_game(self):
         async with self.session_factory() as session:
@@ -128,15 +118,13 @@ class Database:
             ans = PlayerAnswer(user_id=user_id, round_id=round_id, answer=answer)
             session.add(ans)
             await session.commit()
-            return ans
 
     async def get_round_answers(self, round_id: int):
         async with self.session_factory() as session:
             result = await session.execute(
-                select(PlayerAnswer, User.first_name, User.username)
+                select(PlayerAnswer.answer, User.first_name)
                 .join(User)
                 .where(PlayerAnswer.round_id == round_id)
-                .order_by(User.first_name)
             )
             return result.all()
 
@@ -152,8 +140,27 @@ class Database:
 
     async def reset_game_state(self):
         async with self.session_factory() as session:
+            await session.execute(update(Round).where(Round.is_active == True).values(is_active=False))
+            await session.execute(update(Game).where(Game.is_active == True).values(is_active=False))
+            await session.execute(update(User).values(is_ready=False))
             await session.execute("DELETE FROM player_answers")
-            await session.execute("UPDATE rounds SET is_active = 0 WHERE is_active = 1")
-            await session.execute("UPDATE games SET is_active = 0 WHERE is_active = 1")
-            await session.execute("UPDATE users SET is_ready = 0")
             await session.commit()
+
+    # Загрузка вопросов из JSON
+    async def load_questions(self, questions_list):
+        async with self.session_factory() as session:
+            for q in questions_list:
+                question = Question(
+                    question=q["question"],
+                    answer=q["answer"],
+                    hint1=q["hints"][0],
+                    hint2=q["hints"][1],
+                    hint3=q["hints"][2]
+                )
+                session.add(question)
+            await session.commit()
+
+    async def get_random_questions(self, count=7):
+        async with self.session_factory() as session:
+            result = await session.execute(select(Question).order_by(func.random()).limit(count))
+            return result.scalars().all()
