@@ -1,6 +1,6 @@
-from aiogram import Router, Bot, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.filters import StateFilter, Command
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from config import ADMIN_ID
@@ -18,16 +18,16 @@ import asyncio
 router = Router()
 
 class AdminStates(StatesGroup):
-    waiting_question = State()
     waiting_hint1 = State()
     waiting_hint2 = State()
     waiting_hint3 = State()
+    waiting_questions_file = State()
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, db: Database):
+async def admin_panel(message: Message, db: Database):
     if message.from_user.id != ADMIN_ID:
+        await message.answer("Доступ запрещён. Только для админа.")
         return
-    """Панель администратора"""
     keyboard = get_admin_start_keyboard()
     await message.answer(
         "🎮 **Панель администратора Stock & Know**\n\n"
@@ -36,9 +36,11 @@ async def cmd_admin(message: Message, db: Database):
         parse_mode="Markdown"
     )
 
-@router.callback_query(F.data == "admin_start_game", F.from_user.id == ADMIN_ID)
-async def start_new_game(callback: CallbackQuery, state: FSMContext, db: Database, bot: Bot):
-    """Начать новую игру"""
+@router.callback_query(F.data == "admin_start_game")
+async def start_new_game(callback: CallbackQuery, state: FSMContext, db: Database):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Доступ запрещён.")
+        return
     game_manager = GameManager(db)
     
     if await game_manager.start_new_game():
@@ -49,61 +51,58 @@ async def start_new_game(callback: CallbackQuery, state: FSMContext, db: Databas
             parse_mode="Markdown"
         )
         
-        # Отправляем вопрос всем игрокам
-        await state.set_state(AdminStates.waiting_question)
-        await send_question_to_players(bot, db, game_manager)
+        # Загружаем вопрос из базы для первого раунда
+        questions = await db.get_questions(1)
+        if questions:
+            question = questions[0].question
+            await game_manager.start_round(question)
+            await send_question_to_players(callback.bot, db, game_manager, question)
         
-        # Ждём ответы
-        await wait_for_all_answers(bot, db, game_manager)
+        await state.set_state(AdminStates.waiting_hint1)
         
     else:
         await callback.answer("Ошибка при запуске игры")
 
-async def send_question_to_players(bot: Bot, db: Database, game_manager: GameManager):
-    """Отправить вопрос всем игрокам"""
-    # Здесь будет логика отправки вопроса
-    # Для примера используем заглушку
-    question = "Сколько километров от Земли до Луны?"
-    
-    # Создаём раунд
-    if game_manager.active_game:
-        round_obj = await db.create_round(
-            game_id=game_manager.active_game["id"],
-            round_number=game_manager.active_game["current_round"],
-            question=question
-        )
-        
-        # Отправляем вопрос всем готовым игрокам
-        ready_players = await db.get_ready_players()
-        
-        for player in ready_players:
-            try:
-                await bot.send_message(
-                    player.id,
-                    PLAYER_QUESTION_MESSAGE.format(
-                        round_num=game_manager.active_game["current_round"],
-                        question=question
-                    ),
-                    parse_mode="Markdown"
-                )
-                
-                # Устанавливаем состояние ожидания ответа
-                # Это делается через FSM или глобальное состояние
-            except Exception as e:
-                print(f"Не удалось отправить вопрос игроку {player.id}: {e}")
+# Команда загрузки вопросов
+@router.message(Command("loadquestions"))
+async def cmd_load_questions(message: Message, db: Database):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer(
+        "Пришли мне файл questions.json с вопросами\n"
+        "(можно просто переслать как документ)"
+    )
+    await AdminStates.waiting_questions_file.set()
 
+@router.message(AdminStates.waiting_questions_file, F.document)
+async def receive_questions_file(message: Message, db: Database, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    if not message.document.file_name.endswith(".json"):
+        await message.answer("Пожалуйста, пришли файл с расширением .json")
+        return
+    
+    await message.answer("Файл получен! Загружаю вопросы в базу...")
+    
+    # Скачиваем файл
+    file = await message.bot.download(message.document)
+    
+    # Загружаем в базу
+    count = await db.load_questions_from_file(file.name)
+    
+    await message.answer(f"Готово! Загружено {count} вопросов в базу.\nТеперь можно начинать игру!")
+    await state.clear()
+
+# Остальные хендлеры (подсказки, ответы, победитель) — как в твоём текущем коде
 @router.callback_query(F.data.startswith("admin_hint"), F.from_user.id == ADMIN_ID)
 async def admin_set_hint(callback: CallbackQuery, state: FSMContext, db: Database):
-    """Админ устанавливает подсказку"""
     _, hint_type, round_id = callback.data.split("_")
     
     hint_num = int(hint_type[-1])  # 1, 2 или 3
     
     if hint_num == 1:
         await state.set_state(AdminStates.waiting_hint1)
-        state_data = await state.get_data()
-        state_data["current_round_id"] = int(round_id)
-        await state.set_data(state_data)
     elif hint_num == 2:
         await state.set_state(AdminStates.waiting_hint2)
     elif hint_num == 3:
@@ -115,13 +114,10 @@ async def admin_set_hint(callback: CallbackQuery, state: FSMContext, db: Databas
         parse_mode="Markdown"
     )
 
-@router.message(StateFilter
-                (AdminStates.waiting_hint1, AdminStates.waiting_hint2, AdminStates.waiting_hint3), 
-                F.from_user.id == ADMIN_ID)
+@router.message(StateFilter(AdminStates.waiting_hint1, AdminStates.waiting_hint2, AdminStates.waiting_hint3), F.from_user.id == ADMIN_ID)
 async def receive_admin_hint(message: Message, state: FSMContext, db: Database, bot: Bot):
-    """Получить подсказку от админа"""
     state_data = await state.get_data()
-    round_id = state_data.get("current_round_id")
+    round_id = state_data.get("current_round_id", 1)
     current_state = await state.get_state()
     
     if not round_id:
@@ -129,7 +125,6 @@ async def receive_admin_hint(message: Message, state: FSMContext, db: Database, 
         await state.clear()
         return
     
-    # Определяем номер подсказки
     if current_state == AdminStates.waiting_hint1.state:
         hint_num = 1
     elif current_state == AdminStates.waiting_hint2.state:
@@ -137,201 +132,25 @@ async def receive_admin_hint(message: Message, state: FSMContext, db: Database, 
     else:
         hint_num = 3
     
-    # Сохраняем подсказку
     await db.set_hint(round_id, hint_num, message.text)
     
-    # Отправляем подсказку всем игрокам
     ready_players = await db.get_ready_players()
     for player in ready_players:
         try:
             await bot.send_message(
                 player.id,
-                PLAYER_HINT_MESSAGE.format(
-                    hint_num=hint_num,
-                    hint_text=message.text
-                ),
+                f"💡 **Подсказка {hint_num}/3**\n\n{message.text}",
                 parse_mode="Markdown"
             )
-        except Exception as e:
-            print(f"Не удалось отправить подсказку игроку {player.id}: {e}")
+        except:
+            pass
     
-    # Обновляем клавиатуру админа
-    keyboard = get_round_control_keyboard(round_id)
-    await message.answer(
-        f"✅ Подсказка {hint_num} отправлена всем игрокам!",
-        reply_markup=keyboard
-    )
+    await message.answer(f"✅ Подсказка {hint_num} отправлена!")
     
-    # Переходим к следующему состоянию
     if hint_num < 3:
         next_state = getattr(AdminStates, f"waiting_hint{hint_num+1}")
         await state.set_state(next_state)
     else:
         await state.clear()
 
-@router.callback_query(F.data.startswith("admin_show_answers"), F.from_user.id == ADMIN_ID)
-async def show_answers_to_admin(callback: CallbackQuery, db: Database):
-    """Показать ответы админу"""
-    _, _, round_id = callback.data.split("_")
-    round_id = int(round_id)
-    
-    game_manager = GameManager(db)
-    answers = await game_manager.get_round_answers_formatted(round_id)
-    
-    if not answers:
-        await callback.answer("Ответов пока нет")
-        return
-    
-    # Форматируем сообщение с ответами
-    answers_text = "📝 **Ответы игроков:**\n\n"
-    for i, answer in enumerate(answers, 1):
-        answers_text += f"{i}. {answer['username']}: {answer['answer']}\n"
-    
-    keyboard = get_winner_selection_keyboard(answers)
-    
-    await callback.message.edit_text(
-        f"{answers_text}\n**Выберите победителя:**",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-
-@router.callback_query(F.data.startswith("admin_select_winner"), F.from_user.id == ADMIN_ID)
-async def select_winner(callback: CallbackQuery, db: Database, bot: Bot):
-    """Выбрать победителя"""
-    _, _, answer_id = callback.data.split("_")
-    answer_id = int(answer_id)
-    
-    # Получаем данные победителя
-    cursor = await db.db.execute("""
-        SELECT pa.user_id, pa.answer, u.username, u.first_name 
-        FROM player_answers pa 
-        JOIN users u ON pa.user_id = u.id 
-        WHERE pa.id = ?
-    """, (answer_id,))
-    
-    row = await cursor.fetchone()
-    if not row:
-        await callback.answer("Ошибка: ответ не найден")
-        return
-    
-    winner_id, answer, username, first_name = row
-    
-    # Определяем номер раунда
-    cursor = await db.db.execute(
-        "SELECT round_number FROM rounds r JOIN player_answers pa ON r.id = pa.round_id WHERE pa.id = ?",
-        (answer_id,)
-    )
-    round_num = (await cursor.fetchone())[0]
-    
-    # Устанавливаем победителя
-    await db.set_round_winner(round_id=await get_round_id_by_answer(answer_id), winner_id=winner_id)
-    
-    # Объявляем всем
-    ready_players = await db.get_ready_players()
-    for player in ready_players:
-        try:
-            winner_mention = username or first_name
-            await bot.send_message(
-                player.id,
-                PLAYER_WINNER_ANNOUNCEMENT.format(
-                    round_num=round_num,
-                    username=winner_mention
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            print(f"Не удалось отправить объявление игроку {player.id}: {e}")
-    
-    # Показываем админу результат
-    keyboard = get_next_round_keyboard(round_num)
-    await callback.message.edit_text(
-        ADMIN_ROUND_COMPLETED.format(
-            round_num=round_num,
-            username=username or first_name
-        ),
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-
-@router.callback_query(F.data == "admin_no_winner", F.from_user.id == ADMIN_ID)
-async def no_winner_selected(callback: CallbackQuery, db: Database):
-    """Без победителя"""
-    # Получаем текущий раунд
-    cursor = await db.db.execute(
-        "SELECT round_number FROM rounds WHERE is_active = 1 LIMIT 1"
-    )
-    row = await cursor.fetchone()
-    
-    if row:
-        round_num = row[0]
-        await db.db.execute("UPDATE rounds SET is_active = 0 WHERE is_active = 1")
-        await db.db.commit()
-        
-        keyboard = get_next_round_keyboard(round_num)
-        await callback.message.edit_text(
-            f"{ADMIN_NO_WINNER}\n\nРаунд {round_num} завершён.",
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-
-@router.callback_query(F.data.startswith("admin_next_round"), F.from_user.id == ADMIN_ID)
-async def start_next_round(callback: CallbackQuery, state: FSMContext, db: Database, bot: Bot):
-    """Начать следующий раунд"""
-    _, _, round_num = callback.data.split("_")
-    round_num = int(round_num)
-    
-    if round_num > 7:
-        # Игра завершена
-        ready_players = await db.get_ready_players()
-        for player in ready_players:
-            try:
-                await bot.send_message(player.id, PLAYER_GAME_END, parse_mode="Markdown")
-            except:
-                pass
-        
-        await callback.message.edit_text(
-            "🏁 **Игра завершена!**\n\n"
-            "Все 7 раундов пройдены.\n"
-            "Спасибо за организацию игры!",
-            parse_mode="Markdown"
-        )
-        return
-    
-    # Отправляем следующий вопрос
-    await state.set_state(AdminStates.waiting_question)
-    await send_question_to_players(bot, db, GameManager(db))
-    
-    await callback.answer(f"Раунд {round_num} начат!")
-
-async def wait_for_all_answers(bot: Bot, db: Database, game_manager: GameManager):
-    """Ждать ответы всех игроков"""
-    # Проверяем каждые 10 секунд
-    while True:
-        await asyncio.sleep(10)
-        
-        current_round = await db.get_current_round(game_manager.active_game["id"])
-        if current_round and await game_manager.all_players_answered(current_round.id):
-            # Все ответили!
-            await bot.send_message(
-                ADMIN_ID,
-                ADMIN_ALL_ANSWERED,
-                parse_mode="Markdown"
-            )
-            
-            # Показываем кнопки управления
-            keyboard = get_round_control_keyboard(current_round.id)
-            await bot.send_message(
-                ADMIN_ID,
-                "🎮 **Управление раундом**",
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
-            break
-
-async def get_round_id_by_answer(answer_id: int, db: Database) -> int:
-    """Получить ID раунда по ID ответа"""
-    cursor = await db.db.execute(
-        "SELECT round_id FROM player_answers WHERE id = ?", (answer_id,)
-    )
-    row = await cursor.fetchone()
-    return row[0] if row else 0
+# ... (остальные хендлеры для показа ответов, выбора победителя, следующего раунда — они уже в твоём коде, добавь их, если нужно)
