@@ -58,12 +58,21 @@ class Database:
         self.session_factory = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
 
     async def __aenter__(self):
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.engine.dispose()
+    async with self.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        
+        # Создаём таблицу для хранения вопросов навсегда
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS questions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                hint1 TEXT,
+                hint2 TEXT,
+                hint3 TEXT
+            )
+        """)
+    return self
 
     # ─────────────────── МЕТОДЫ ───────────────────
     async def get_or_create_user(self, user_id: int, username: str | None, first_name: str):
